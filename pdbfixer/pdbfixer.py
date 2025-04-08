@@ -169,7 +169,7 @@ class CCDResidueDefinition:
                 symbol=row[symbolCol],
                 leaving=row[leavingCol] == 'Y',
                 coords=mm.Vec3(float(row[xCol]), float(row[yCol]), float(row[zCol]))*0.1,
-                charge=row[chargeCol] if row[chargeCol] != "?" else 0,
+                charge=row[chargeCol],
                 aromatic=row[aromaticCol] == 'Y'
             ) for row in atomData.getRowList()
         ]
@@ -1332,7 +1332,7 @@ class PDBFixer(object):
             self.topology = newTopology2
             self.positions = newPositions2
 
-    def removeHeterogens(self, keepWater=True):
+    def removeHeterogens(self, keepWater=True,keepCoenzyme=False):
         """Remove all heterogens from the structure.
 
         Parameters
@@ -1353,21 +1353,52 @@ class PDBFixer(object):
         >>> fixer.removeHeterogens(keepWater=False)
 
         """
-
-        keep = set(proteinResidues).union(dnaResidues).union(rnaResidues)
-        keep.add('N')
-        keep.add('UNK')
-        if keepWater:
+        # If water and coenzymes are kept, do noting.
+        if (keepWater and keepCoenzyme): 
+            return ([])
+        
+        # Remove Coenzymes (ligands),keep waters
+        if(not keepWater and not keepCoenzyme):
+            keep = set(proteinResidues).union(dnaResidues).union(rnaResidues)
+            keep.add('N')
+            keep.add('UNK')
+            toDelete = []
+            for residue in self.topology.residues():
+                if residue.name not in keep:
+                    toDelete.append(residue)
+            modeller = app.Modeller(self.topology, self.positions)
+            modeller.delete(toDelete)
+            self.topology = modeller.topology
+            self.positions = modeller.positions
+            return toDelete
+        
+        # Remove Coenzymes (ligands),keep waters
+        if(keepWater and not keepCoenzyme):
+            keep = set(proteinResidues).union(dnaResidues).union(rnaResidues)
+            keep.add('N')
+            keep.add('UNK')
             keep.add('HOH')
-        toDelete = []
-        for residue in self.topology.residues():
-            if residue.name not in keep:
-                toDelete.append(residue)
-        modeller = app.Modeller(self.topology, self.positions)
-        modeller.delete(toDelete)
-        self.topology = modeller.topology
-        self.positions = modeller.positions
-        return toDelete
+            toDelete = []
+            for residue in self.topology.residues():
+                if residue.name not in keep:
+                    toDelete.append(residue)
+            modeller = app.Modeller(self.topology, self.positions)
+            modeller.delete(toDelete)
+            self.topology = modeller.topology
+            self.positions = modeller.positions
+            return toDelete
+        
+        # Remove Waters,keep waters
+        if (not keepWater and keepCoenzyme):
+            toDelete = []
+            for residue in self.topology.residues():
+                if residue.name == 'HOH':
+                    toDelete.append(residue)
+            modeller = app.Modeller(self.topology, self.positions)
+            modeller.delete(toDelete)
+            self.topology = modeller.topology
+            self.positions = modeller.positions
+            return toDelete
 
     def addMissingHydrogens(self, pH=7.0, forcefield=None):
         """Add missing hydrogen atoms to the structure.
