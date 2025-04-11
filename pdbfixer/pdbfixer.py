@@ -1353,6 +1353,7 @@ class PDBFixer(object):
         >>> fixer.removeHeterogens(keepWater=False)
 
         """
+        print(keepWater, keepCoenzyme)
         # If water and coenzymes are kept, do noting.
         if (keepWater and keepCoenzyme): 
             return ([])
@@ -1388,7 +1389,7 @@ class PDBFixer(object):
             self.positions = modeller.positions
             return toDelete
         
-        # Remove Waters,keep waters
+        # Remove Waters and Coenzyme 
         if (not keepWater and keepCoenzyme):
             toDelete = []
             for residue in self.topology.residues():
@@ -1400,7 +1401,7 @@ class PDBFixer(object):
             self.positions = modeller.positions
             return toDelete
 
-    def addMissingHydrogens(self, pH=7.0, forcefield=None):
+    def addMissingHydrogens2(self, pH=7.0, forcefield=None):
         """Add missing hydrogen atoms to the structure.
 
         Parameters
@@ -1429,6 +1430,111 @@ class PDBFixer(object):
         modeller.addHydrogens(pH=pH, forcefield=forcefield, variants=variants, platform=self.platform)
         self.topology = modeller.topology
         self.positions = modeller.positions
+
+    def addMissingHydrogens(self, pH=7.0, forcefield=None):
+        """Add missing hydrogen atoms to the structure.
+
+        Parameters
+        ----------
+        pH : float, optional, default=7.0
+            The pH based on which to select hydrogens.
+        forcefield : ForceField, optional, default=None
+            The forcefield used when adding and minimizing hydrogens. If None, a default forcefield is used.
+
+        Notes
+        -----
+        No extensive electrostatic analysis is performed; only default residue pKas are used.  The pH is only
+        taken into account for standard amino acids.
+
+        Examples
+        --------
+
+        Add missing hydrogens appropriate for pH 8.
+
+        >>> fixer = PDBFixer(pdbid='1VII')
+        >>> fixer.addMissingHydrogens(pH=8.0)
+        """
+        extraDefinitions = self._downloadNonstandardDefinitions()
+        variants = []
+        protein_atoms = []
+        
+        # First pass: identify protein atoms and residues
+        for atom in self.topology.atoms():
+            if atom.residue.name in proteinResidues:
+                protein_atoms.append(atom.index)
+        
+        # Create a Modeller with only protein atoms
+        modeller = app.Modeller(self.topology, self.positions)
+        if len(protein_atoms) < self.topology.getNumAtoms():
+            # Only keep protein atoms
+            to_delete = [atom for atom in self.topology.atoms() if atom.index not in protein_atoms]
+            modeller.delete(to_delete)
+        
+        # Now add hydrogens only to protein residues
+        for res in modeller.topology.residues():
+            variant = self._describeVariant(res, extraDefinitions)
+            variants.append(variant)
+        
+        
+        modeller.addHydrogens(pH=pH, forcefield=forcefield, variants=variants, platform=self.platform)
+        
+
+        # Merge back the original non-protein atoms with the new protein atoms that have hydrogens
+        if len(protein_atoms) < self.topology.getNumAtoms():
+        #if False:
+            print('aa')
+            # Create a new topology combining original non-protein atoms with modified protein atoms
+            new_topology = app.Topology()
+            new_positions = []*unit.nanometer
+            
+            # Copy chains
+            chain_map = {}
+            for chain in self.topology.chains():
+                new_chain = new_topology.addChain(chain.id)
+                chain_map[chain] = new_chain
+            
+            # Copy residues and atoms
+            atom_map = {}
+            for residue in self.topology.residues():
+                new_residue = new_topology.addResidue(residue.name, chain_map[residue.chain], residue.id, residue.insertionCode)
+                
+                if residue.name in proteinResidues:
+                    # Find matching residue in modeller
+                    mod_res = None
+                    for mr in modeller.topology.residues():
+                        if (mr.name == residue.name and 
+                            mr.id == residue.id and 
+                            mr.chain.id == residue.chain.id):
+                            mod_res = mr
+                            break
+                    
+                    if mod_res is None:
+                        raise ValueError(f"Could not find matching residue {residue.name} {residue.id} in modeller")
+                    
+                    # Add all atoms from modeller residue (including new hydrogens)
+                    for mod_atom in mod_res.atoms():
+                        new_atom = new_topology.addAtom(mod_atom.name, mod_atom.element, new_residue)
+                        atom_map[mod_atom] = new_atom
+                        new_positions.append(modeller.positions[mod_atom.index])
+                
+                # Handle non-protein residues (original atoms)
+                else:
+                    for atom in residue.atoms():
+                        new_atom = new_topology.addAtom(atom.name, atom.element, new_residue)
+                        atom_map[atom] = new_atom
+                        new_positions.append(self.positions[atom.index])
+            
+            # Copy bonds
+            #for bond in self.topology.bonds():
+            #    if bond[0] in atom_map and bond[1] in atom_map:
+            #        new_topology.addBond(atom_map[bond[0]], atom_map[bond[1]])
+            
+            self.topology = new_topology
+            self.positions = new_positions
+        else:
+            print('bb')
+            self.topology = modeller.topology
+            self.positions = modeller.positions
 
     def _downloadNonstandardDefinitions(self):
         """If the file contains any nonstandard residues, download their definitions and build
