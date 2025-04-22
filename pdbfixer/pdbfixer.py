@@ -1353,7 +1353,6 @@ class PDBFixer(object):
         >>> fixer.removeHeterogens(keepWater=False)
 
         """
-        print(keepWater, keepCoenzyme)
         # If water and coenzymes are kept, do noting.
         if (keepWater and keepCoenzyme): 
             return ([])
@@ -1482,7 +1481,6 @@ class PDBFixer(object):
         # Merge back the original non-protein atoms with the new protein atoms that have hydrogens
         if len(protein_atoms) < self.topology.getNumAtoms():
         #if False:
-            print('aa')
             # Create a new topology combining original non-protein atoms with modified protein atoms
             new_topology = app.Topology()
             new_positions = []*unit.nanometer
@@ -1532,7 +1530,6 @@ class PDBFixer(object):
             self.topology = new_topology
             self.positions = new_positions
         else:
-            print('bb')
             self.topology = modeller.topology
             self.positions = modeller.positions
 
@@ -1829,6 +1826,131 @@ class PDBFixer(object):
                     if dist_squared < nearest_squared:
                         nearest_squared = dist_squared
         return np.sqrt(nearest_squared)
+
+
+
+    def atomicOPT(self, residueList=None):
+        """optmized geometry.
+
+        Parameters
+        ----------
+        resdueList : list, optional, default=None
+            If None, optmized all atoms (heavy and H atoms)
+            If a list provided, only the heavy atoms in the list and H atoms are optimized 
+
+        Notes
+        -----
+            The added residues are not well optmized. 
+
+        """
+        from openmm.app import ForceField
+        from openmm.app.forcefield import NoCutoff,HBonds
+        from openmm.app.simulation import Simulation
+        from openmm import LangevinMiddleIntegrator
+        from openmm.app.pdbfile import PDBFile
+        from sys import stdout
+
+        extraDefinitions = self._downloadNonstandardDefinitions()
+        variants = []
+        protein_atoms = []
+        
+        # First pass: identify protein atoms and residues
+        for atom in self.topology.atoms():
+            if atom.residue.name in proteinResidues:
+                protein_atoms.append(atom.index)
+        
+        # Create a Modeller with only protein atoms
+        modeller = app.Modeller(self.topology, self.positions)
+        if len(protein_atoms) < self.topology.getNumAtoms():
+            # Only keep protein atoms
+            to_delete = [atom for atom in self.topology.atoms() if atom.index not in protein_atoms]
+            modeller.delete(to_delete)
+        
+        # Now add hydrogens only to protein residues
+        for res in modeller.topology.residues():
+            variant = self._describeVariant(res, extraDefinitions)
+            variants.append(variant)
+
+        PDBFile.writeFile(modeller.topology, modeller.positions, open('temp.pdb', 'w'))
+        # Do optimization 
+        pdb = PDBFile('temp.pdb')
+        forcefield = ForceField('amber14-all.xml', 'amber14/tip3pfb.xml')
+        #system = forcefield.createSystem(modeller.topology, nonbondedMethod=NoCutoff, nonbondedCutoff=1*unit.nanometer, constraints=HBonds)
+        system = forcefield.createSystem(pdb.topology, nonbondedMethod=NoCutoff, nonbondedCutoff=1*unit.nanometer, constraints=HBonds)
+        integrator = LangevinMiddleIntegrator(300*unit.kelvin, 1/unit.picosecond, 0.004*unit.picoseconds)
+        #simulation = Simulation(modeller.topology, system, integrator)
+        simulation = Simulation(pdb.topology, system, integrator)
+        simulation.context.setPositions(pdb.positions)
+        #simulation.context.setPositions(modeller.positions)
+        simulation.minimizeEnergy(tolerance=100 * unit.kilojoule/unit.mole/unit.nanometer)
+        state = simulation.context.getState(getPositions=True, getEnergy=True)
+
+
+        #modeller.addHydrogens(pH=pH, forcefield=forcefield, variants=variants, platform=self.platform)
+        modeller.topology = simulation.topology
+        modeller.positions = state.getPositions()
+        # Merge back the original non-protein atoms with the new protein atoms that have hydrogens
+        if len(protein_atoms) < self.topology.getNumAtoms():
+        #if False:
+            # Create a new topology combining original non-protein atoms with modified protein atoms
+            new_topology = app.Topology()
+            new_positions = []*unit.nanometer
+            
+            # Copy chains
+            chain_map = {}
+            for chain in self.topology.chains():
+                new_chain = new_topology.addChain(chain.id)
+                chain_map[chain] = new_chain
+        
+
+            # Copy residues and atoms
+            atom_map = {}
+            proteir_resID_ori = 0
+            for residue in self.topology.residues():
+                new_residue = new_topology.addResidue(residue.name, chain_map[residue.chain], residue.id, residue.insertionCode)
+                proteir_resID_ori = proteir_resID_ori + 1
+                
+                if residue.name in proteinResidues:
+                    # Find matching residue in modeller
+                    mod_res = None
+                    proteir_resID_new = 0
+                    for mr in modeller.topology.residues():
+                        print(mr.name,residue.name, mr.id, residue.id, mr.chain.id, residue.chain.id,proteir_resID_new,proteir_resID_ori)
+                        proteir_resID_new = proteir_resID_new+1
+                        if (mr.name == residue.name and 
+                            proteir_resID_new == proteir_resID_ori  and # Some are not start from zero 
+                            mr.chain.id == residue.chain.id):
+                            mod_res = mr
+                            break
+                    
+                    if mod_res is None:
+                        raise ValueError(f"Could not find matching residue {residue.name} {residue.id} in modeller")
+                    
+                    # Add all atoms from modeller residue (including new hydrogens)
+                    for mod_atom in mod_res.atoms():
+                        new_atom = new_topology.addAtom(mod_atom.name, mod_atom.element, new_residue)
+                        atom_map[mod_atom] = new_atom
+                        new_positions.append(modeller.positions[mod_atom.index])
+
+                
+                # Handle non-protein residues (original atoms)
+                else:
+                    for atom in residue.atoms():
+                        new_atom = new_topology.addAtom(atom.name, atom.element, new_residue)
+                        atom_map[atom] = new_atom
+                        new_positions.append(self.positions[atom.index])
+            
+            # Copy bonds
+            #for bond in self.topology.bonds():
+            #    if bond[0] in atom_map and bond[1] in atom_map:
+            #        new_topology.addBond(atom_map[bond[0]], atom_map[bond[1]])
+            
+            self.topology = new_topology
+            self.positions = new_positions
+        else:
+            self.topology = modeller.topology
+            self.positions = modeller.positions
+
 
 
 def main():
